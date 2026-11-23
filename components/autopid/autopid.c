@@ -2294,6 +2294,28 @@ static void sanitize_for_id(char *dest, const char *src, size_t max_len) {
     dest[j] = '\0';
 }
 
+// Translates WiCAN unit spellings into the symbols Home Assistant accepts.
+// HA rejects a discovery payload outright when a device class gets a unit it
+// does not know (e.g. duration + "minutes"), so the sensor is never created.
+static const char* ha_normalize_unit(const char* unit) {
+    if (!unit) return "";
+    if (strcasecmp(unit, "none") == 0) return "";
+    if (strcasecmp(unit, "minutes") == 0 || strcasecmp(unit, "minute") == 0 || strcasecmp(unit, "mins") == 0) return "min";
+    if (strcasecmp(unit, "seconds") == 0 || strcasecmp(unit, "second") == 0 || strcasecmp(unit, "sec") == 0) return "s";
+    if (strcasecmp(unit, "hours") == 0 || strcasecmp(unit, "hour") == 0 || strcmp(unit, "hr") == 0) return "h";
+    if (strcasecmp(unit, "days") == 0 || strcasecmp(unit, "day") == 0) return "d";
+    if (strcasecmp(unit, "volts") == 0 || strcasecmp(unit, "volt") == 0) return "V";
+    if (strcmp(unit, "degC") == 0) return "\u00b0C";
+    if (strcmp(unit, "degF") == 0) return "\u00b0F";
+    return unit;
+}
+
+// A class of "none" (any case) or blank means "no class" in the PID config,
+// but HA only accepts that by leaving device_class out of the payload.
+static bool ha_class_is_set(const char* dev_class) {
+    return dev_class && strlen(dev_class) > 0 && strcasecmp(dev_class, "none") != 0;
+}
+
 // Translates WiCAN units into Home Assistant device classes
 static const char* get_ha_device_class(const char* unit) {
     if (!unit || strlen(unit) == 0) return "";
@@ -2403,7 +2425,7 @@ static void autopid_publish_discovery_task(void *pvParameters)
         cJSON_AddStringToObject(payload, "name", sensor_name); \
         cJSON_AddStringToObject(payload, "state_topic", state_topic); \
         cJSON_AddStringToObject(payload, "value_template", val_template); \
-        if (dev_class && strlen(dev_class) > 0) cJSON_AddStringToObject(payload, "device_class", dev_class); \
+        if (ha_class_is_set(dev_class)) cJSON_AddStringToObject(payload, "device_class", dev_class); \
         if (unit && strlen(unit) > 0) { \
             cJSON_AddStringToObject(payload, "unit_of_measurement", unit); \
             cJSON_AddStringToObject(payload, "state_class", "measurement"); \
@@ -2498,16 +2520,17 @@ static void autopid_publish_discovery_task(void *pvParameters)
                                 if (param->destination_type != DEST_DEFAULT) continue;
 
                                   char val_template[256];
-                                  snprintf(val_template, sizeof(val_template), "{{ value_json['%s'] if '%s' in value_json else this.state }}", param->name, param->name);
+                                  snprintf(val_template, sizeof(val_template), "{{ value_json['%s'] if '%s' in value_json else (this.state if this.state not in ['unknown', 'unavailable'] else None) }}", param->name, param->name);
 
                                 const char *target_topic = config_server_get_mqtt_rx_topic();
 
                                 // Apply User Class OR fallback to Auto-Mapping
-                                const char *final_class = (param->class && strlen(param->class) > 0 && strcmp(param->class, "none") != 0) 
-                                    ? param->class 
-                                    : get_ha_device_class(param->unit);
+                                const char *ha_unit = ha_normalize_unit(param->unit);
+                                const char *final_class = ha_class_is_set(param->class)
+                                    ? param->class
+                                    : get_ha_device_class(ha_unit);
 
-                                PUBLISH_HA_SENSOR(param->name, target_topic, val_template, param->unit, final_class);
+                                PUBLISH_HA_SENSOR(param->name, target_topic, val_template, ha_unit, final_class);
                             }
                         }
                     }
@@ -2542,16 +2565,19 @@ static void autopid_publish_discovery_task(void *pvParameters)
                             if (param->destination_type != DEST_DEFAULT) continue;
 
                             char val_template[256];
-                            snprintf(val_template, sizeof(val_template), "{{ value_json['%s'] if '%s' in value_json else this.state }}", param->name, param->name);
+                            snprintf(val_template, sizeof(val_template), "{{ value_json['%s'] if '%s' in value_json else (this.state if this.state not in ['unknown', 'unavailable'] else None) }}", param->name, param->name);
 
                             const char *target_topic = config_server_get_mqtt_rx_topic();
 
                             // Apply User Class OR fallback to Auto-Mapping
-                            const char *final_class = (param->class && strlen(param->class) > 0) 
-                                ? param->class 
-                                : get_ha_device_class(param->unit);
+                            // Same rules as the grouped path: "none" means no class,
+                            // and units are converted to HA's symbols.
+                            const char *ha_unit = ha_normalize_unit(param->unit);
+                            const char *final_class = ha_class_is_set(param->class)
+                                ? param->class
+                                : get_ha_device_class(ha_unit);
 
-                            PUBLISH_HA_SENSOR(param->name, target_topic, val_template, param->unit, final_class);
+                            PUBLISH_HA_SENSOR(param->name, target_topic, val_template, ha_unit, final_class);
                         }
                     }
                 }
