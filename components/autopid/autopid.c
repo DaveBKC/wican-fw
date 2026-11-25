@@ -2323,6 +2323,21 @@ static bool ha_class_is_set(const char* dev_class) {
     return dev_class && strlen(dev_class) > 0 && strcasecmp(dev_class, "none") != 0;
 }
 
+static const char* get_ha_device_class(const char* unit);
+
+// Picks the device class to send: the PID's own class unless it is "none", else one
+// derived from the unit. Drops a class HA would reject for the unit, because HA then
+// refuses the whole sensor (e.g. the standard table marks O2 sensor ratios as "gas").
+static const char* ha_final_class(const char* param_class, const char* ha_unit) {
+    const char* cls = ha_class_is_set(param_class) ? param_class : get_ha_device_class(ha_unit);
+    if (cls && strcmp(cls, "gas") == 0) {
+        bool gas_unit = ha_unit && (strcmp(ha_unit, "m\u00b3") == 0 || strcmp(ha_unit, "ft\u00b3") == 0 ||
+                                    strcmp(ha_unit, "CCF") == 0 || strcmp(ha_unit, "L") == 0);
+        if (!gas_unit) return "";
+    }
+    return cls;
+}
+
 // Translates WiCAN units into Home Assistant device classes
 static const char* get_ha_device_class(const char* unit) {
     if (!unit || strlen(unit) == 0) return "";
@@ -2507,7 +2522,21 @@ static void autopid_publish_discovery_task(void *pvParameters)
 
     // 3. Publish OBD2/CAN PIDs (if enabled)
     if (strcmp(config_server_get_mqtt_disc_pids_en(), "enable") == 0) {
-        if (autopid_lock(1000)) {
+        // Right after boot the PID config may not be loaded yet, and while the car is on
+        // (or the ECU is not answering) the poller holds the lock for a whole cycle, as
+        // does the publish-on-connect task. A 1 s wait often lost that race, so the PID
+        // sensors were silently left out of discovery. Keep trying for up to a minute.
+        bool pids_locked = false;
+        for (int attempt = 0; attempt < 12 && !pids_locked; attempt++) {
+            pids_locked = autopid_lock(5000);
+            if (!pids_locked && (!autopid_config || !autopid_config->mutex)) {
+                vTaskDelay(pdMS_TO_TICKS(5000));
+            }
+        }
+        if (!pids_locked) {
+            ESP_LOGW(TAG, "Auto Discovery: PID config busy for 60 s, PID sensors not published");
+        }
+        if (pids_locked) {
             if (autopid_config) {
                 // --- A. Process Grouped PIDs ---
                 if (autopid_config->use_groups) {
@@ -2533,9 +2562,7 @@ static void autopid_publish_discovery_task(void *pvParameters)
 
                                 // Apply User Class OR fallback to Auto-Mapping
                                 const char *ha_unit = ha_normalize_unit(param->unit);
-                                const char *final_class = ha_class_is_set(param->class)
-                                    ? param->class
-                                    : get_ha_device_class(ha_unit);
+                                const char *final_class = ha_final_class(param->class, ha_unit);
 
                                 PUBLISH_HA_SENSOR(param->name, target_topic, val_template, ha_unit, final_class);
                             }
@@ -2580,9 +2607,7 @@ static void autopid_publish_discovery_task(void *pvParameters)
                             // Same rules as the grouped path: "none" means no class,
                             // and units are converted to HA's symbols.
                             const char *ha_unit = ha_normalize_unit(param->unit);
-                            const char *final_class = ha_class_is_set(param->class)
-                                ? param->class
-                                : get_ha_device_class(ha_unit);
+                            const char *final_class = ha_final_class(param->class, ha_unit);
 
                             PUBLISH_HA_SENSOR(param->name, target_topic, val_template, ha_unit, final_class);
                         }
