@@ -2318,16 +2318,50 @@ static bool ha_class_is_set(const char* dev_class) {
 
 static const char* get_ha_device_class(const char* unit);
 
+// Units Home Assistant accepts for each device class this firmware can send. A class
+// with a unit HA does not accept makes HA refuse the whole sensor, and the PID tables
+// have several such pairs (rpm as "speed", fuel trim % as "volume_storage", MAF g/s as
+// "volume_flow_rate", O2 ratios as "gas"). Classes not listed here are sent unchanged.
+typedef struct { const char *cls; const char *units[12]; } ha_class_units_t;
+static const ha_class_units_t ha_class_units[] = {
+    {"temperature", {"\u00b0C", "\u00b0F", "K"}},
+    {"voltage", {"V", "mV", "kV"}},
+    {"current", {"A", "mA"}},
+    {"pressure", {"Pa", "kPa", "hPa", "bar", "mbar", "psi", "inHg", "mmHg"}},
+    {"atmospheric_pressure", {"Pa", "kPa", "hPa", "bar", "mbar", "psi", "inHg", "mmHg"}},
+    {"speed", {"km/h", "mph", "m/s", "kn", "ft/s"}},
+    {"distance", {"km", "m", "cm", "mm", "mi", "ft", "yd", "in"}},
+    {"duration", {"d", "h", "min", "s", "ms"}},
+    {"volume", {"L", "mL", "gal", "m\u00b3", "ft\u00b3"}},
+    {"volume_storage", {"L", "mL", "gal", "m\u00b3", "ft\u00b3"}},
+    {"volume_flow_rate", {"L/h", "L/min", "L/s", "gal/h", "gal/min", "m\u00b3/h", "m\u00b3/s", "ft\u00b3/min"}},
+    {"gas", {"m\u00b3", "ft\u00b3", "CCF", "L"}},
+    {"power", {"W", "kW"}},
+    {"energy", {"Wh", "kWh"}},
+    {"weight", {"kg", "g", "mg", "lb", "oz"}},
+    {"frequency", {"Hz", "kHz", "MHz"}},
+    {"power_factor", {"%", ""}},
+    {"battery", {"%"}},
+    {"humidity", {"%"}},
+};
+
+static bool ha_unit_fits_class(const char *cls, const char *unit) {
+    if (!unit) unit = "";
+    for (size_t i = 0; i < sizeof(ha_class_units) / sizeof(ha_class_units[0]); i++) {
+        if (strcmp(ha_class_units[i].cls, cls) != 0) continue;
+        for (size_t u = 0; u < 12 && ha_class_units[i].units[u]; u++) {
+            if (strcmp(ha_class_units[i].units[u], unit) == 0) return true;
+        }
+        return false;
+    }
+    return true; // class not in the table: leave it to HA
+}
+
 // Picks the device class to send: the PID's own class unless it is "none", else one
-// derived from the unit. Drops a class HA would reject for the unit, because HA then
-// refuses the whole sensor (e.g. the standard table marks O2 sensor ratios as "gas").
+// derived from the unit. Drops the class when HA would reject it for the unit.
 static const char* ha_final_class(const char* param_class, const char* ha_unit) {
     const char* cls = ha_class_is_set(param_class) ? param_class : get_ha_device_class(ha_unit);
-    if (cls && strcmp(cls, "gas") == 0) {
-        bool gas_unit = ha_unit && (strcmp(ha_unit, "m\u00b3") == 0 || strcmp(ha_unit, "ft\u00b3") == 0 ||
-                                    strcmp(ha_unit, "CCF") == 0 || strcmp(ha_unit, "L") == 0);
-        if (!gas_unit) return "";
-    }
+    if (cls && cls[0] != '\0' && !ha_unit_fits_class(cls, ha_unit)) return "";
     return cls;
 }
 
